@@ -3,13 +3,16 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
-	"encoding/hex"
+	// "encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"net"
 	"os"
 	"os/signal"
+	"bufio"
+	"time"
+	"path/filepath"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/perf"
@@ -35,6 +38,9 @@ type perfEventItem struct {
 	DstIp uint32
 	SrcPort uint16
 	DstPort uint16
+	SeqNum uint32
+	AckNum uint32
+	TimeStamp uint64
 }
 
 func main() {
@@ -78,28 +84,66 @@ func main() {
 	)
 
 	go func() {
+		// ファイル名とバッファサイズを設定
+		filePath := "log/tcp_info_seq.txt"
+		bufferSize := 64 // バイト単位で設定
+
+		// ファイルをオープンして書き込み用のWriterを作成
+		file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+		if err != nil {
+			fmt.Println("ファイルをオープンできませんでした:", err)
+			return
+		}
+		defer file.Close()
+
+		writer := bufio.NewWriter(file)
+
+		// ローテーションタイミングを設定
+		rotationDuration := time.Minute * 30 // 30分ごとにローテーション
+		rotationTimer := time.NewTimer(rotationDuration)
+
 		var event perfEventItem
 		for {
-			evnt, err := perfEvent.Read()
-			if err != nil {
-				if errors.Unwrap(err) == perf.ErrClosed {
-					break
-				}
-				panic(err)
+			select {
+				case <-rotationTimer.C:
+					// ローテーションタイミングでファイルをクローズ・リネーム・再オープン
+					writer.Flush()
+					file.Close()
+					rotateFile(filePath)
+					file, _ = os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+					writer = bufio.NewWriter(file)
+					rotationTimer.Reset(rotationDuration)
+				
+				default:
+					evnt, err := perfEvent.Read()
+					if err != nil {
+						if errors.Unwrap(err) == perf.ErrClosed {
+							break
+						}
+						panic(err)
+					}
+					reader := bytes.NewReader(evnt.RawSample)
+					if err := binary.Read(reader, binary.LittleEndian, &event); err != nil {
+						panic(err)
+					}
+
+					message := fmt.Sprintf("TCP: %v:%d -> %v:%d, seq:%v, ack:%v, timestamp:%v\n",
+						intToIpv4(event.SrcIp), ntohs(event.SrcPort),
+						intToIpv4(event.DstIp), ntohs(event.DstPort),
+						event.SeqNum, event.AckNum,
+						event.TimeStamp,
+					)	
+
+					// バッファサイズを超えたらフラッシュして書き込み
+					if writer.Buffered()+len(message) > bufferSize {
+						writer.Flush()
+					}
+
+					// メッセージをバッファに書き込む
+					writer.WriteString(message)
+					received += len(evnt.RawSample)
+					lost += int(evnt.LostSamples)
 			}
-			reader := bytes.NewReader(evnt.RawSample)
-			if err := binary.Read(reader, binary.LittleEndian, &event); err != nil {
-				panic(err)
-			}
-			fmt.Printf("TCP: %v:%d -> %v:%d\n",
-				intToIpv4(event.SrcIp), ntohs(event.SrcPort),
-				intToIpv4(event.DstIp), ntohs(event.DstPort),
-			)
-			if len(evnt.RawSample) - METADATA_SIZE > 0 {
-				fmt.Println(hex.Dump(evnt.RawSample[METADATA_SIZE:]))
-			}
-			received += len(evnt.RawSample)
-			lost += int(evnt.LostSamples)
 		}
 	}()
 	<-ctrlC
@@ -118,4 +162,17 @@ func intToIpv4(ip uint32) net.IP {
 
 func ntohs(value uint16) uint16 {
 	return ((value & 0xff) << 8 ) | (value >> 8)
+}
+
+// ファイルのローテーションを行う関数
+func rotateFile(filePath string) {
+	// ファイルのリネーム
+	fileName := filepath.Base(filePath)
+	fileDir := filepath.Dir(filePath)
+	newFilePath := fmt.Sprintf("%s/%s.%s", fileDir, time.Now().Format("2006-01-02-15-04-05"), fileName)
+	os.Rename(filePath, newFilePath)
+
+	// 新しいファイルを作成
+	file, _ := os.Create(filePath)
+	file.Close()
 }
