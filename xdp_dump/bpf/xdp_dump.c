@@ -63,12 +63,16 @@ BPF_MAP_DEF(perfmap) = {
 BPF_MAP_ADD(perfmap);
 
 
+// なんかbyteのキリが悪いと挙動がおかしくなりそう. 一応パディングみたいなことをしている
 // PerfEvent item
 struct perf_event_item {
   __u32 src_ip, dst_ip;
+  __u32 seq, ack_seq;
   __u16 src_port, dst_port;
+  __u32 pad;
+  __u64 timestamp;
 };
-_Static_assert(sizeof(struct perf_event_item) == 12, "wrong size of perf_event_item");
+_Static_assert(sizeof(struct perf_event_item) == 32, "wrong size of perf_event_item");
 
 // XDP program //
 SEC("xdp")
@@ -105,28 +109,20 @@ int xdp_dump(struct xdp_md *ctx) {
     return XDP_ABORTED;
   }
 
-  // Emit perf event for every TCP SYN packet
-  if (tcp->syn) {
-    struct perf_event_item evt = {
+  __u64 timestamp = bpf_ktime_get_ns();
+
+  struct perf_event_item evt = {
       .src_ip = ip->saddr,
       .dst_ip = ip->daddr,
       .src_port = tcp->source,
       .dst_port = tcp->dest,
-    };
-    // flags for bpf_perf_event_output() actually contain 2 parts (each 32bit long):
-    //
-    // bits 0-31: either
-    // - Just index in eBPF map
-    // or
-    // - "BPF_F_CURRENT_CPU" kernel will use current CPU_ID as eBPF map index
-    //
-    // bits 32-63: may be used to tell kernel to amend first N bytes
-    // of original packet (ctx) to the end of the data.
-
-    // So total perf event length will be sizeof(evt) + packet_size
-    __u64 flags = BPF_F_CURRENT_CPU | (packet_size << 32);
-    bpf_perf_event_output(ctx, &perfmap, flags, &evt, sizeof(evt));
-  }
+      .seq = tcp->seq,
+      .ack_seq = tcp->ack_seq,
+      .pad = 0,
+      .timestamp = timestamp,
+  };
+  __u64 flags = BPF_F_CURRENT_CPU | (packet_size << 32);
+  bpf_perf_event_output(ctx, &perfmap, flags, &evt, sizeof(evt));
 
   return XDP_PASS;
 }
