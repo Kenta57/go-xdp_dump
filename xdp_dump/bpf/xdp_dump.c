@@ -58,7 +58,7 @@ struct tcphdr {
 // PerfEvent eBPF map
 BPF_MAP_DEF(perfmap) = {
     .map_type = BPF_MAP_TYPE_PERF_EVENT_ARRAY,
-    .max_entries = 128,
+    .max_entries = 1024,
 };
 BPF_MAP_ADD(perfmap);
 

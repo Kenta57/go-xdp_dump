@@ -13,6 +13,7 @@ import (
 	"bufio"
 	"time"
 	"path/filepath"
+	"io"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/perf"
@@ -76,7 +77,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println("All new TCP connection requests (SYN) coming to this host will be dumped here.")
+	fmt.Println("All TCP connections coming to this host will be dumped here.")
 	fmt.Println()
 	var (
 		received int = 0
@@ -86,7 +87,7 @@ func main() {
 	go func() {
 		// ファイル名とバッファサイズを設定
 		filePath := "log/tcp_info_seq.txt"
-		bufferSize := 64 // バイト単位で設定
+		bufferSize := 4096 // バイト単位で設定
 
 		// ファイルをオープンして書き込み用のWriterを作成
 		file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
@@ -99,7 +100,7 @@ func main() {
 		writer := bufio.NewWriter(file)
 
 		// ローテーションタイミングを設定
-		rotationDuration := time.Minute * 30 // 30分ごとにローテーション
+		rotationDuration := time.Minute * 5 // 30分ごとにローテーション
 		rotationTimer := time.NewTimer(rotationDuration)
 
 		var event perfEventItem
@@ -113,6 +114,10 @@ func main() {
 					file, _ = os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 					writer = bufio.NewWriter(file)
 					rotationTimer.Reset(rotationDuration)
+
+					fmt.Println("\nSummary:")
+					fmt.Printf("\t%d Event(s) Received\n", received)
+					fmt.Printf("\t%d Event(s) Lost(e.g. small buffer, delays in processing)\n", lost)
 				
 				default:
 					evnt, err := perfEvent.Read()
@@ -124,10 +129,14 @@ func main() {
 					}
 					reader := bytes.NewReader(evnt.RawSample)
 					if err := binary.Read(reader, binary.LittleEndian, &event); err != nil {
+						if err == io.EOF {
+							continue
+						}
+						fmt.Printf("%v", err)
 						panic(err)
 					}
 
-					message := fmt.Sprintf("TCP: %v:%d -> %v:%d, seq:%v, ack:%v, timestamp:%v\n",
+					message := fmt.Sprintf("%v, %d, %v, %d, %v, %v, %v\n",
 						intToIpv4(event.SrcIp), ntohs(event.SrcPort),
 						intToIpv4(event.DstIp), ntohs(event.DstPort),
 						event.SeqNum, event.AckNum,
