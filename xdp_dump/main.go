@@ -2,8 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/binary"
-	// "encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,6 +12,7 @@ import (
 	"time"
 	"path/filepath"
 	"io"
+	"encoding/binary"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/perf"
@@ -86,7 +85,7 @@ func main() {
 
 	go func() {
 		// ファイル名とバッファサイズを設定
-		filePath := "log/tcp_info_seq.txt"
+		filePath := "log/tcp_info_seq.bin"
 		bufferSize := 4096 // バイト単位で設定
 
 		// ファイルをオープンして書き込み用のWriterを作成
@@ -97,10 +96,10 @@ func main() {
 		}
 		defer file.Close()
 
-		writer := bufio.NewWriter(file)
+		writer := bufio.NewWriterSize(file, bufferSize)
 
 		// ローテーションタイミングを設定
-		rotationDuration := time.Minute * 5 // 30分ごとにローテーション
+		rotationDuration := time.Minute // 30分ごとにローテーション
 		rotationTimer := time.NewTimer(rotationDuration)
 
 		var event perfEventItem
@@ -108,7 +107,11 @@ func main() {
 			select {
 				case <-rotationTimer.C:
 					// ローテーションタイミングでファイルをクローズ・リネーム・再オープン
-					writer.Flush()
+					err = writer.Flush()
+					if err != nil {
+						fmt.Println("バッファのフラッシュエラー:", err)
+						return
+					}
 					file.Close()
 					rotateFile(filePath)
 					file, _ = os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
@@ -136,20 +139,18 @@ func main() {
 						panic(err)
 					}
 
-					message := fmt.Sprintf("%v, %d, %v, %d, %v, %v, %v\n",
-						intToIpv4(event.SrcIp), ntohs(event.SrcPort),
-						intToIpv4(event.DstIp), ntohs(event.DstPort),
-						event.SeqNum, event.AckNum,
-						event.TimeStamp,
-					)	
-
-					// バッファサイズを超えたらフラッシュして書き込み
-					if writer.Buffered()+len(message) > bufferSize {
-						writer.Flush()
+					// 構造体をバイナリに変換してバッファに書き込む
+					err = binary.Write(writer, binary.LittleEndian, &event)
+					if err != nil {
+						fmt.Println("ファイルへの書き込みエラー:", err)
+						return
 					}
 
+					// バッファサイズを超えたらフラッシュして書き込み
+					writer.Flush()
+		
+
 					// メッセージをバッファに書き込む
-					writer.WriteString(message)
 					received += len(evnt.RawSample)
 					lost += int(evnt.LostSamples)
 			}
